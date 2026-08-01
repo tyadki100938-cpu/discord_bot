@@ -23,7 +23,7 @@ class TrendCog(commands.Cog):
         self.send_weekly_trends.cancel()
 
     async def _fetch_trending_tv(self, country: str = "KR"):
-        """TMDB APIから人気のTV番組を非同期で取得
+        """TMDB APIから今週のトレンドTV番組を非同期で取得
         :param country: 'KR' (韓国), 'JP' (日本)
         """
         api_key = getattr(config, 'TMDB_API_KEY', None)
@@ -32,11 +32,10 @@ class TrendCog(commands.Cog):
             print("[Trend Error] TMDB_API_KEY が config に設定されていません。")
             return []
 
-        url = "https://api.themoviedb.org/3/discover/tv"
+        # 週間トレンドAPIエンドポイントに変更
+        url = "https://api.themoviedb.org/3/trending/tv/week"
         params = {
-            "language": "ja-JP",
-            "sort_by": "popularity.desc",
-            "with_origin_country": country
+            "language": "ja-JP"
         }
 
         # 認証方式の自動判定 (Bearer Token か 通常の API Key か)
@@ -51,7 +50,16 @@ class TrendCog(commands.Cog):
                 async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
                     if response.status == 200:
                         data = await response.json()
-                        return data.get("results", [])[:5]
+                        results = data.get("results", [])
+                        
+                        # 国・言語コードでフィルタリング (KR: 韓国語 'ko', JP: 日本語 'ja')
+                        target_lang = "ko" if country == "KR" else "ja"
+                        filtered_shows = [
+                            show for show in results 
+                            if show.get("original_language") == target_lang
+                        ]
+                        
+                        return filtered_shows[:5]
                     else:
                         error_text = await response.text()
                         print(f"[TMDB API Error] Status: {response.status}, Body: {error_text}")
@@ -69,7 +77,7 @@ class TrendCog(commands.Cog):
 
         embeds = []
         for idx, show in enumerate(shows, 1):
-            title = show.get("name", "タイトル不明")
+            title = show.get("name") or show.get("original_name", "タイトル不明")
             overview = show.get("overview", "あらすじ準備中...")
             score = show.get("vote_average", 0.0)
             poster_path = show.get("poster_path")
@@ -79,7 +87,7 @@ class TrendCog(commands.Cog):
 
             embed = discord.Embed(
                 title=f"{idx}位：{title}",
-                description=overview or "説明はありません。",
+                description=overview if overview else "説明はありません。",
                 color=0xE50914
             )
             embed.add_field(name="⭐ 評価", value=f"{score:.1f} / 10", inline=True)
@@ -107,7 +115,6 @@ class TrendCog(commands.Cog):
             print(f"[Trend Task Error] チャンネルID ({channel_id}) が見つかりませんでした。")
             return
 
-        # 韓国ドラマと日本ドラマのみ配信
         categories = [
             ("🇰🇷 **今週の韓国ドラマ TOP 5**", "KR"),
             ("🇯🇵 **今週の日本ドラマ・番組 TOP 5**", "JP")
@@ -148,7 +155,7 @@ class TrendCog(commands.Cog):
             for embed in embeds:
                 await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send("トレンド情報の取得に失敗しました。コンソールログのエラー内容を確認してください。")
+            await interaction.followup.send("トレンド情報の取得に失敗したか、該当する作品が見つかりませんでした。")
 
     # /trend 専用のエラーハンドラ
     @trend_command.error
