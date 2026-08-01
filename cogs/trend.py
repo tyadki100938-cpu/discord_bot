@@ -4,7 +4,8 @@ from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-import requests
+import aiohttp
+import config  # 先頭でインポート
 
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
@@ -20,9 +21,8 @@ class TrendCog(commands.Cog):
     def cog_unload(self):
         self.send_weekly_trends.cancel()
 
-    def _fetch_trending_tv_sync(self):
-        """TMDB APIから今週のトレンドTV番組を取得（同期処理）"""
-        import config
+    async def _fetch_trending_tv(self):
+        """TMDB APIから今週のトレンドTV番組を非同期で取得"""
         api_key = getattr(config, 'TMDB_API_KEY', None)
         
         if not api_key:
@@ -30,23 +30,34 @@ class TrendCog(commands.Cog):
             return []
 
         url = "https://api.themoviedb.org/3/trending/tv/week"
-        params = {
-            "api_key": api_key,
-            "language": "ja-JP"
-        }
+        
+        # 認証方式の自動判定 (Bearer Token か 通常の API Key か)
+        headers = {}
+        params = {"language": "ja-JP"}
+
+        if api_key.startswith("eyJ"):  # Bearer Token (v4) の場合
+            headers["Authorization"] = f"Bearer {api_key}"
+        else:                         # API Key (v3) の場合
+            params["api_key"] = api_key
+
         try:
-            response = requests.get(url, params=params, timeout=5)
-            if response.status_code == 200:
-                return response.json().get("results", [])[:5]
-            else:
-                print(f"[TMDB API Error] Status Code: {response.status_code}, Response: {response.text}")
+            # aiohttpによる完全非同期通信
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get("results", [])[:5]
+                    else:
+                        error_text = await response.text()
+                        print(f"[TMDB API Error] Status: {response.status}, Body: {error_text}")
+                        return []
         except Exception as e:
-            print(f"[TMDB Fetch Error] {e}")
-        return []
+            print(f"[TMDB Fetch Error] 通信エラーが発生しました: {e}")
+            return []
 
     async def build_trend_embeds(self):
-        """トレンド情報のEmbedリストを生成（非同期化）"""
-        shows = await asyncio.to_thread(self._fetch_trending_tv_sync)
+        """トレンド情報のEmbedリストを生成"""
+        shows = await self._fetch_trending_tv()
         if not shows:
             return []
 
@@ -73,13 +84,12 @@ class TrendCog(commands.Cog):
             embeds.append(embed)
         return embeds
 
-    # --- ① 定期実行タスク（毎週日曜日 朝8:00） ---
+    # --- ① 定期実行タスク ---
     @tasks.loop(time=TARGET_TIME)
     async def send_weekly_trends(self):
         if datetime.datetime.now(JST).weekday() != 6:
             return
 
-        import config
         channel_id = getattr(config, 'TREND_CHANNEL_ID', None)
         if not channel_id:
             return
@@ -103,10 +113,8 @@ class TrendCog(commands.Cog):
     # --- ② コマンド手動実行（/trend） ---
     @app_commands.command(name="trend", description="今週の話題作・トレンドランキングを表示します")
     async def trend_command(self, interaction: discord.Interaction):
-        # 1. タイムアウト防止のため最優先で defer()
         await interaction.response.defer()
 
-        # 2. 非同期で安全にTMDBデータ取得＆Embed生成
         embeds = await self.build_trend_embeds()
 
         if embeds:
@@ -114,7 +122,7 @@ class TrendCog(commands.Cog):
             for embed in embeds:
                 await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send("トレンド情報の取得に失敗しました。`TMDB_API_KEY` の設定またはログを確認してください。")
+            await interaction.followup.send("トレンド情報の取得に失敗しました。コンソールログのエラー内容を確認してください。")
 
 async def setup(bot):
     await bot.add_cog(TrendCog(bot))
