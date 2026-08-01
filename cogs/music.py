@@ -1,42 +1,17 @@
 import asyncio
-import datetime
 import traceback
-from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 import aiohttp
-import yt_dlp
 import config  # 先頭でインポート
-
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn',
-}
-
-YDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-}
-
-# 日本時間（JST）の午前8:00を指定
-JST = ZoneInfo("Asia/Tokyo")
-TARGET_TIME = datetime.time(hour=8, minute=0, second=0, tzinfo=JST)
 
 class MusicCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.send_weekly_playlist.start()
-
-    def cog_unload(self):
-        self.send_weekly_playlist.cancel()
 
     async def _fetch_apple_music_kpop_top_tracks(self):
         """Apple Musicの無料RSSフィードからランキング情報を非同期取得"""
-        # 有効な最新エンドポイントURLに修正
         url = "https://rss.applemarketingtools.com/api/v2/jp/music/most-played/10/songs.json"
         try:
             async with aiohttp.ClientSession() as session:
@@ -84,31 +59,7 @@ class MusicCog(commands.Cog):
             traceback.print_exc()
             return None
 
-    # --- ① 定期実行タスク（毎週日曜日 朝8:00） ---
-    @tasks.loop(time=TARGET_TIME)
-    async def send_weekly_playlist(self):
-        if datetime.datetime.now(JST).weekday() != 6:
-            return
-
-        channel_id = getattr(config, 'MUSIC_CHANNEL_ID', None)
-        if not channel_id:
-            print("[Music Task Warning] MUSIC_CHANNEL_ID が設定されていません。")
-            return
-
-        channel = self.bot.get_channel(channel_id)
-        if not channel:
-            print(f"[Music Task Error] チャンネルID ({channel_id}) が見つかりませんでした。")
-            return
-
-        embed = await self.build_playlist_embed()
-        if embed:
-            await channel.send(embed=embed)
-
-    @send_weekly_playlist.before_loop
-    async def before_send_weekly_playlist(self):
-        await self.bot.wait_until_ready()
-
-    # --- ② コマンド手動実行 (/playlist) ---
+    # --- コマンド手動実行 (/playlist) ---
     @app_commands.command(name="playlist", description="最新のヒットチャートを表示します")
     async def playlist_command(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -120,7 +71,7 @@ class MusicCog(commands.Cog):
         else:
             await interaction.followup.send("ランキングの取得に失敗しました。コンソールログを確認してください。")
 
-    # /playlist 専用のエラーハンドラ（defer済みにも安全に対応）
+    # /playlist 専用のエラーハンドラ
     @playlist_command.error
     async def playlist_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         print(f"[Playlist Command Error] {error}")
@@ -130,61 +81,6 @@ class MusicCog(commands.Cog):
             await interaction.followup.send("コマンド実行中にエラーが発生しました。", ephemeral=True)
         else:
             await interaction.response.send_message("コマンド実行中にエラーが発生しました。", ephemeral=True)
-
-    # --- ③ VC音源再生用のスラッシュコマンド (/play) ---
-    @app_commands.command(name="play", description="ボイスチャンネルでYouTube等の音声を再生します")
-    @app_commands.describe(url="再生したいYouTubeなどのURL")
-    async def play(self, interaction: discord.Interaction, url: str):
-        if not interaction.user.voice:
-            await interaction.response.send_message("ボイスチャンネルに入ってから実行してください！", ephemeral=True)
-            return
-
-        await interaction.response.defer()
-        channel = interaction.user.voice.channel
-        
-        vc = interaction.guild.voice_client
-        if not vc:
-            try:
-                vc = await channel.connect()
-            except Exception as e:
-                print(f"[VC Connect Error] {e}")
-                await interaction.followup.send("ボイスチャンネルへの接続に失敗しました。")
-                return
-        elif vc.channel != channel:
-            await vc.move_to(channel)
-
-        try:
-            # yt-dlpの処理をスレッドプールで実行
-            def extract():
-                with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-                    return ydl.extract_info(url, download=False)
-
-            info = await asyncio.to_thread(extract)
-            
-            # プレイリスト等の場合は最初の要素を取得
-            if 'entries' in info:
-                info = info['entries'][0]
-
-            stream_url = info.get('url')
-            title = info.get('title', '音声')
-            
-            if not stream_url:
-                await interaction.followup.send("音声ストリームの取得に失敗しました。")
-                return
-
-            # FFmpegPCMAudio で音源を生成
-            source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
-            
-            if vc.is_playing():
-                vc.stop()
-            
-            vc.play(source)
-            await interaction.followup.send(f"🎵 再生中: **{title}**")
-
-        except Exception as e:
-            print(f"[Play Command Error] {e}")
-            traceback.print_exc()
-            await interaction.followup.send(f"再生エラーが発生しました: `{e}`")
 
 async def setup(bot):
     await bot.add_cog(MusicCog(bot))
