@@ -6,9 +6,44 @@ import config
 
 # インテントの設定
 intents = discord.Intents.default()
-intents.message_content = True  # メッセージコンテンツインテントが必要な場合
+intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Botクラスを拡張して setup_hook を定義
+class MyBot(commands.Bot):
+    def __init__(self):
+        super().__init__(
+            command_prefix="!",
+            intents=intents
+        )
+
+    async def setup_hook(self):
+        """Botの起動時に一度だけ非同期で呼び出されるセットアップフック"""
+        initial_extensions = [
+            'cogs.trend',
+            'cogs.music',
+            'cogs.translation',
+            'cogs.ai'
+        ]
+
+        # Cogの読み込み処理
+        for extension in initial_extensions:
+            try:
+                await self.load_extension(extension)
+                print(f"Loaded extension: {extension}")
+            except Exception as e:
+                print(f"❌ Failed to load extension {extension}: {e}")
+
+        # スラッシュコマンド（app_commands）をDiscordサーバーと同期
+        print("🔄 Syncing slash commands...")
+        try:
+            synced = await self.tree.sync()
+            print(f"✅ Synced {len(synced)} command(s)")
+        except Exception as e:
+            print(f"❌ Failed to sync commands: {e}")
+
+
+bot = MyBot()
 
 @bot.event
 async def on_ready():
@@ -17,23 +52,6 @@ async def on_ready():
 
 async def main():
     async with bot:
-        # Cogの読み込み処理
-        initial_extensions = [
-            'cogs.trend',
-            'cogs.music',
-            'cogs.translation',
-            'cogs.ai'
-            # 他のCogがあればここに追加
-        ]
-        
-        for extension in initial_extensions:
-            try:
-                await bot.load_extension(extension)
-                print(f"Loaded extension: {extension}")
-            except Exception as e:
-                print(f"Failed to load extension {extension}: {e}")
-
-        # トークンの確認ログ
         token = getattr(config, 'DISCORD_TOKEN', os.getenv('DISCORD_TOKEN'))
         if not token:
             print("❌ ERROR: DISCORD_TOKEN が設定されていません！")
