@@ -26,19 +26,20 @@ class MusicCog(commands.Cog):
         self.send_weekly_playlist.cancel()
 
     def _fetch_apple_music_kpop_top_tracks(self):
-        """Apple Musicの無料RSSフィードからK-POPのランキング情報を取得"""
-        # 日本のK-POP Top 10ソングを取得するRSS URL (登録・認証不要)
+        """Apple Musicの無料RSSフィードからK-POPのランキング情報を取得（同期処理）"""
         url = "https://rss.applemarketingtools.com/api/v2/jp/music/most-played/10/by-genre/11/songs.json"
         try:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 return response.json().get('feed', {}).get('results', [])
+            else:
+                print(f"[Apple Music Error] Status Code: {response.status_code}")
         except Exception as e:
             print(f"[Apple Music Fetch Error] {e}")
         return []
 
     async def build_playlist_embed(self):
-        """取得したデータをDiscord用のEmbedカードに変換"""
+        """取得したデータをDiscord用のEmbedカードに変換（非同期化）"""
         try:
             results = await asyncio.to_thread(self._fetch_apple_music_kpop_top_tracks)
             if not results:
@@ -73,13 +74,15 @@ class MusicCog(commands.Cog):
         if datetime.datetime.now(JST).weekday() != 6:
             return
 
-        # config.py から MUSIC_CHANNEL_ID を参照
         import config
-        if not getattr(config, 'MUSIC_CHANNEL_ID', None):
+        channel_id = getattr(config, 'MUSIC_CHANNEL_ID', None)
+        if not channel_id:
+            print("[Music Task Warning] MUSIC_CHANNEL_ID が設定されていません。")
             return
 
-        channel = self.bot.get_channel(config.MUSIC_CHANNEL_ID)
+        channel = self.bot.get_channel(channel_id)
         if not channel:
+            print(f"[Music Task Error] チャンネルID ({channel_id}) が見つかりませんでした。")
             return
 
         embed = await self.build_playlist_embed()
@@ -93,7 +96,7 @@ class MusicCog(commands.Cog):
     # --- ② コマンド手動実行 (/playlist) ---
     @app_commands.command(name="playlist", description="最新のK-POPヒットチャートを表示します")
     async def playlist_command(self, interaction: discord.Interaction):
-        # 「考え中...」を表示させてタイムアウトを防止
+        # 最優先で defer() を呼んでタイムアウトを防止
         await interaction.response.defer()
 
         embed = await self.build_playlist_embed()
@@ -101,7 +104,7 @@ class MusicCog(commands.Cog):
         if embed:
             await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send("ランキングの取得に失敗しました。")
+            await interaction.followup.send("ランキングの取得に失敗しました。ログを確認してください。")
 
     # --- ③ VC音源再生用のスラッシュコマンド (/play) ---
     @app_commands.command(name="play", description="ボイスチャンネルでYouTube等の音声を再生します")
@@ -116,7 +119,12 @@ class MusicCog(commands.Cog):
         
         vc = interaction.guild.voice_client
         if not vc:
-            vc = await channel.connect()
+            try:
+                vc = await channel.connect()
+            except Exception as e:
+                print(f"[VC Connect Error] {e}")
+                await interaction.followup.send("ボイスチャンネルへの接続に失敗しました。")
+                return
 
         try:
             with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
@@ -132,7 +140,8 @@ class MusicCog(commands.Cog):
                 vc.play(source)
                 await interaction.followup.send(f"🎵 再生中: **{title}**")
         except Exception as e:
-            await interaction.followup.send(f"再生エラー: {e}")
+            print(f"[Play Command Error] {e}")
+            await interaction.followup.send(f"再生エラーが発生しました: {e}")
 
 async def setup(bot):
     await bot.add_cog(MusicCog(bot))

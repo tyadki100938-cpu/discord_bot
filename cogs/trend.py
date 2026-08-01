@@ -1,10 +1,10 @@
+import asyncio
 import datetime
 from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import requests
-import config
 
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
@@ -15,26 +15,41 @@ TARGET_TIME = datetime.time(hour=8, minute=0, second=0, tzinfo=JST)
 class TrendCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        if config.TMDB_API_KEY:
-            self.send_weekly_trends.start()
+        self.send_weekly_trends.start()
 
     def cog_unload(self):
         self.send_weekly_trends.cancel()
 
-    def get_trending_tv(self):
-        """TMDB APIから今週のトレンドTV番組を取得"""
+    def _fetch_trending_tv_sync(self):
+        """TMDB APIから今週のトレンドTV番組を取得（同期処理）"""
+        import config
+        api_key = getattr(config, 'TMDB_API_KEY', None)
+        
+        if not api_key:
+            print("[Trend Error] TMDB_API_KEY が config に設定されていません。")
+            return []
+
         url = "https://api.themoviedb.org/3/trending/tv/week"
         params = {
-            "api_key": config.TMDB_API_KEY,
+            "api_key": api_key,
             "language": "ja-JP"
         }
-        response = requests.get(url, params=params)
-        if response.status_code == 200:
-            return response.json().get("results", [])[:5]
+        try:
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code == 200:
+                return response.json().get("results", [])[:5]
+            else:
+                print(f"[TMDB API Error] Status Code: {response.status_code}, Response: {response.text}")
+        except Exception as e:
+            print(f"[TMDB Fetch Error] {e}")
         return []
 
-    def build_trend_embeds(self, shows):
-        """トレンド情報のEmbedリストを生成する共通処理"""
+    async def build_trend_embeds(self):
+        """トレンド情報のEmbedリストを生成（非同期化）"""
+        shows = await asyncio.to_thread(self._fetch_trending_tv_sync)
+        if not shows:
+            return []
+
         embeds = []
         for idx, show in enumerate(shows, 1):
             title = show.get("name", "タイトル不明")
@@ -61,23 +76,23 @@ class TrendCog(commands.Cog):
     # --- ① 定期実行タスク（毎週日曜日 朝8:00） ---
     @tasks.loop(time=TARGET_TIME)
     async def send_weekly_trends(self):
-        # 今日が「日曜日（weekday() == 6）」でなければスキップ
         if datetime.datetime.now(JST).weekday() != 6:
             return
 
-        if not config.TREND_CHANNEL_ID:
+        import config
+        channel_id = getattr(config, 'TREND_CHANNEL_ID', None)
+        if not channel_id:
             return
 
-        channel = self.bot.get_channel(config.TREND_CHANNEL_ID)
+        channel = self.bot.get_channel(channel_id)
         if not channel:
             return
 
-        shows = self.get_trending_tv()
-        if not shows:
+        embeds = await self.build_trend_embeds()
+        if not embeds:
             return
 
         await channel.send("🎬 **【今週の話題作・トレンドランキング】**")
-        embeds = self.build_trend_embeds(shows)
         for embed in embeds:
             await channel.send(embed=embed)
 
@@ -88,17 +103,18 @@ class TrendCog(commands.Cog):
     # --- ② コマンド手動実行（/trend） ---
     @app_commands.command(name="trend", description="今週の話題作・トレンドランキングを表示します")
     async def trend_command(self, interaction: discord.Interaction):
+        # 1. タイムアウト防止のため最優先で defer()
         await interaction.response.defer()
 
-        shows = self.get_trending_tv()
-        if not shows:
-            await interaction.followup.send("トレンド情報の取得に失敗しました。")
-            return
+        # 2. 非同期で安全にTMDBデータ取得＆Embed生成
+        embeds = await self.build_trend_embeds()
 
-        embeds = self.build_trend_embeds(shows)
-        await interaction.followup.send("🎬 **【今週の話題作・トレンドランキング】**")
-        for embed in embeds:
-            await interaction.followup.send(embed=embed)
+        if embeds:
+            await interaction.followup.send("🎬 **【今週の話題作・トレンドランキング】**")
+            for embed in embeds:
+                await interaction.followup.send(embed=embed)
+        else:
+            await interaction.followup.send("トレンド情報の取得に失敗しました。`TMDB_API_KEY` の設定またはログを確認してください。")
 
 async def setup(bot):
     await bot.add_cog(TrendCog(bot))
