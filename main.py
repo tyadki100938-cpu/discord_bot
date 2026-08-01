@@ -21,6 +21,8 @@ async def main():
         initial_extensions = [
             'cogs.trend',
             'cogs.music',
+            'cogs.translation',
+            'cogs.ai'
             # 他のCogがあればここに追加
         ]
         
