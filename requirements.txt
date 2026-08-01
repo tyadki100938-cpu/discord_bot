@@ -5,3 +5,4 @@ deepl
 google-genai
 requests
 spotipy
+discord.py[voice]
