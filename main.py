@@ -20,8 +20,6 @@ class MyBot(commands.Bot):
     async def setup_hook(self):
         """Botの起動時に一度だけ非同期で呼び出されるセットアップフック"""
         initial_extensions = [
-            'cogs.trend',
-            'cogs.music',
             'cogs.translation',
             'cogs.ai'
         ]
