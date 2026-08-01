@@ -1,13 +1,13 @@
 import asyncio
 import datetime
-import traceback  # トレースバック出力用に追加
+import traceback
 from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import aiohttp
 import yt_dlp
-import config
+import config  # 先頭でインポート
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
@@ -22,6 +22,7 @@ YDL_OPTIONS = {
     'default_search': 'auto',
 }
 
+# 日本時間（JST）の午前8:00を指定
 JST = ZoneInfo("Asia/Tokyo")
 TARGET_TIME = datetime.time(hour=8, minute=0, second=0, tzinfo=JST)
 
@@ -34,8 +35,9 @@ class MusicCog(commands.Cog):
         self.send_weekly_playlist.cancel()
 
     async def _fetch_apple_music_kpop_top_tracks(self):
-        """Apple Musicの無料RSSフィードからK-POPのランキング情報を非同期取得"""
-        url = "https://rss.applemarketingtools.com/api/v2/jp/music/most-played/10/by-genre/11/songs.json"
+        """Apple Musicの無料RSSフィードからランキング情報を非同期取得"""
+        # 有効な最新エンドポイントURLに修正
+        url = "https://rss.applemarketingtools.com/api/v2/jp/music/most-played/10/songs.json"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
@@ -58,17 +60,19 @@ class MusicCog(commands.Cog):
                 return None
 
             embed = discord.Embed(
-                title="🎶 今週のK-POPヒットチャート (TOP 5)",
+                title="🎶 今週のヒットチャート (TOP 5)",
                 description="Apple Musicの最新チャートよりお届けします！",
-                color=0xFA243C
+                color=0xFA243C  # Apple Musicカラー (赤)
             )
             
+            # 1位の曲のジャケット画像をカードのサムネイル画像としてセット (高画質化)
             first_track = results[0]
             artwork = first_track.get('artworkUrl100')
             if artwork:
                 img_url = artwork.replace("100x100bb", "500x500bb")
                 embed.set_thumbnail(url=img_url)
 
+            # 1位〜5位をリスト化
             for i, item in enumerate(results[:5], 1):
                 track_name = item.get('name', '不明')
                 artist_name = item.get('artistName', '不明')
@@ -80,7 +84,7 @@ class MusicCog(commands.Cog):
             traceback.print_exc()
             return None
 
-    # --- ① 定期実行タスク ---
+    # --- ① 定期実行タスク（毎週日曜日 朝8:00） ---
     @tasks.loop(time=TARGET_TIME)
     async def send_weekly_playlist(self):
         if datetime.datetime.now(JST).weekday() != 6:
@@ -105,9 +109,8 @@ class MusicCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     # --- ② コマンド手動実行 (/playlist) ---
-    @app_commands.command(name="playlist", description="最新のK-POPヒットチャートを表示します")
+    @app_commands.command(name="playlist", description="最新のヒットチャートを表示します")
     async def playlist_command(self, interaction: discord.Interaction):
-        # 応答を保留化（タイムアウト防止）
         await interaction.response.defer()
 
         embed = await self.build_playlist_embed()
@@ -115,17 +118,16 @@ class MusicCog(commands.Cog):
         if embed:
             await interaction.followup.send(embed=embed)
         else:
-            await interaction.followup.send("ランキングの取得に失敗しました。BOTコンソールのエラーログを確認してください。")
+            await interaction.followup.send("ランキングの取得に失敗しました。コンソールログを確認してください。")
 
-    # /playlist 専用のエラーハンドラ（ログに出力されない問題を回避）
+    # /playlist 専用のエラーハンドラ（defer済みにも安全に対応）
     @playlist_command.error
     async def playlist_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         print(f"[Playlist Command Error] {error}")
         traceback.print_exception(type(error), error, error.__traceback__)
         
-        # すでに defer() されているかどうかに応じてレスポンスを分岐
         if interaction.response.is_done():
-            await interaction.followup.send("コマンド実行中にエラーが発生しました。")
+            await interaction.followup.send("コマンド実行中にエラーが発生しました。", ephemeral=True)
         else:
             await interaction.response.send_message("コマンド実行中にエラーが発生しました。", ephemeral=True)
 
@@ -152,12 +154,14 @@ class MusicCog(commands.Cog):
             await vc.move_to(channel)
 
         try:
+            # yt-dlpの処理をスレッドプールで実行
             def extract():
                 with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
                     return ydl.extract_info(url, download=False)
 
             info = await asyncio.to_thread(extract)
             
+            # プレイリスト等の場合は最初の要素を取得
             if 'entries' in info:
                 info = info['entries'][0]
 
@@ -168,6 +172,7 @@ class MusicCog(commands.Cog):
                 await interaction.followup.send("音声ストリームの取得に失敗しました。")
                 return
 
+            # FFmpegPCMAudio で音源を生成
             source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
             
             if vc.is_playing():

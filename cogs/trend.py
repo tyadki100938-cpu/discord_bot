@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import traceback
 from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
@@ -21,27 +22,31 @@ class TrendCog(commands.Cog):
     def cog_unload(self):
         self.send_weekly_trends.cancel()
 
-    async def _fetch_trending_tv(self):
-        """TMDB APIから今週のトレンドTV番組を非同期で取得"""
+    async def _fetch_trending_tv(self, country: str = "KR"):
+        """TMDB APIから人気のTV番組を非同期で取得
+        :param country: 'KR' (韓国), 'JP' (日本)
+        """
         api_key = getattr(config, 'TMDB_API_KEY', None)
         
         if not api_key:
             print("[Trend Error] TMDB_API_KEY が config に設定されていません。")
             return []
 
-        url = "https://api.themoviedb.org/3/trending/tv/week"
-        
+        url = "https://api.themoviedb.org/3/discover/tv"
+        params = {
+            "language": "ja-JP",
+            "sort_by": "popularity.desc",
+            "with_origin_country": country
+        }
+
         # 認証方式の自動判定 (Bearer Token か 通常の API Key か)
         headers = {}
-        params = {"language": "ja-JP"}
-
         if api_key.startswith("eyJ"):  # Bearer Token (v4) の場合
             headers["Authorization"] = f"Bearer {api_key}"
         else:                         # API Key (v3) の場合
             params["api_key"] = api_key
 
         try:
-            # aiohttpによる完全非同期通信
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
                     if response.status == 200:
@@ -53,11 +58,12 @@ class TrendCog(commands.Cog):
                         return []
         except Exception as e:
             print(f"[TMDB Fetch Error] 通信エラーが発生しました: {e}")
+            traceback.print_exc()
             return []
 
-    async def build_trend_embeds(self):
+    async def build_trend_embeds(self, country: str = "KR"):
         """トレンド情報のEmbedリストを生成"""
-        shows = await self._fetch_trending_tv()
+        shows = await self._fetch_trending_tv(country=country)
         if not shows:
             return []
 
@@ -84,45 +90,76 @@ class TrendCog(commands.Cog):
             embeds.append(embed)
         return embeds
 
-    # --- ① 定期実行タスク ---
+    # --- ① 定期実行タスク (毎週日曜日 朝8:00) ---
     @tasks.loop(time=TARGET_TIME)
     async def send_weekly_trends(self):
+        # 毎週日曜日（weekday == 6）のみ実行
         if datetime.datetime.now(JST).weekday() != 6:
             return
 
         channel_id = getattr(config, 'TREND_CHANNEL_ID', None)
         if not channel_id:
+            print("[Trend Task Warning] TREND_CHANNEL_ID が設定されていません。")
             return
 
         channel = self.bot.get_channel(channel_id)
         if not channel:
+            print(f"[Trend Task Error] チャンネルID ({channel_id}) が見つかりませんでした。")
             return
 
-        embeds = await self.build_trend_embeds()
-        if not embeds:
-            return
+        # 韓国ドラマと日本ドラマのみ配信
+        categories = [
+            ("🇰🇷 **今週の韓国ドラマ TOP 5**", "KR"),
+            ("🇯🇵 **今週の日本ドラマ・番組 TOP 5**", "JP")
+        ]
 
-        await channel.send("🎬 **【今週の話題作・トレンドランキング】**")
-        for embed in embeds:
-            await channel.send(embed=embed)
+        await channel.send("🎬 **【今週の話題作・トレンドランキング配信】**")
+
+        for title, country_code in categories:
+            embeds = await self.build_trend_embeds(country=country_code)
+            if embeds:
+                await channel.send(f"\n### {title}")
+                for embed in embeds:
+                    await channel.send(embed=embed)
+            await asyncio.sleep(1)
 
     @send_weekly_trends.before_loop
     async def before_send_weekly_trends(self):
         await self.bot.wait_until_ready()
 
     # --- ② コマンド手動実行（/trend） ---
-    @app_commands.command(name="trend", description="今週の話題作・トレンドランキングを表示します")
-    async def trend_command(self, interaction: discord.Interaction):
+    @app_commands.command(name="trend", description="今週の韓国・日本ドラマランキングを表示します")
+    @app_commands.describe(category="絞り込むカテゴリを選択してください")
+    @app_commands.choices(category=[
+        app_commands.Choice(name="🇰🇷 韓国ドラマ", value="KR"),
+        app_commands.Choice(name="🇯🇵 日本ドラマ・番組", value="JP"),
+    ])
+    async def trend_command(self, interaction: discord.Interaction, category: app_commands.Choice[str] = None):
         await interaction.response.defer()
 
-        embeds = await self.build_trend_embeds()
+        # オプション未選択時はデフォルトで「韓国ドラマ」を表示
+        selected_country = category.value if category else "KR"
+        category_name = category.name if category else "🇰🇷 韓国ドラマ"
+
+        embeds = await self.build_trend_embeds(country=selected_country)
 
         if embeds:
-            await interaction.followup.send("🎬 **【今週の話題作・トレンドランキング】**")
+            await interaction.followup.send(f"🎬 **【今週のトレンドランキング - {category_name}】**")
             for embed in embeds:
                 await interaction.followup.send(embed=embed)
         else:
             await interaction.followup.send("トレンド情報の取得に失敗しました。コンソールログのエラー内容を確認してください。")
+
+    # /trend 専用のエラーハンドラ
+    @trend_command.error
+    async def trend_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        print(f"[Trend Command Error] {error}")
+        traceback.print_exception(type(error), error, error.__traceback__)
+        
+        if interaction.response.is_done():
+            await interaction.followup.send("コマンド実行中にエラーが発生しました。", ephemeral=True)
+        else:
+            await interaction.response.send_message("コマンド実行中にエラーが発生しました。", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(TrendCog(bot))
